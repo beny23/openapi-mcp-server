@@ -3,11 +3,11 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openapi-mcp-sse"
+name = "openapi-mcp-server"
 version = "0.1.0"
-description = "SSE-based MCP server CLI tool for OpenAPI specifications with Cursor compatibility"
+description = "MCP server CLI tool for OpenAPI specifications with Cursor compatibility (SSE or HTTP)"
 authors = [
-    {name = "OpenAPI MCP SSE", email = "contact@example.com"}
+    {name = "OpenAPI MCP Server", email = "contact@example.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,8 +20,8 @@ dependencies = [
 ]
 
 [project.scripts]
-openapi-mcp-sse = "openapi_mcp_sse.main:cli"
+openapi-mcp-server = "openapi_mcp_server.main:cli"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["openapi_mcp_sse*"]
+include = ["openapi_mcp_server*"]
