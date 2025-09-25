@@ -9,6 +9,7 @@ with support for various authentication methods and Cursor compatibility.
 import json
 import logging
 import sys
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from urllib.parse import urlparse
@@ -65,6 +66,8 @@ def create_http_client(
     auth_type: str = "none",
     api_key: Optional[str] = None,
     api_key_header: str = "X-API-Key",
+    api_key_location: str = "header",
+    api_key_param_name: str = "key",
     bearer_token: Optional[str] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
@@ -73,9 +76,19 @@ def create_http_client(
     """Create HTTP client with authentication and custom headers."""
     headers = {}
     auth = None
+    event_hooks = None
     
     if auth_type == "api_key" and api_key:
-        headers[api_key_header] = api_key
+        if api_key_location == "header":
+            headers[api_key_header] = api_key
+        elif api_key_location == "query":
+            async def _append_query_auth(request: httpx.Request) -> None:
+                params_dict = dict(request.url.params)
+                # Overwrite existing value to ensure consistency
+                params_dict[api_key_param_name] = api_key  # type: ignore[index]
+                request.url = request.url.copy_with(params=httpx.QueryParams(params_dict))
+
+            event_hooks = {"request": [_append_query_auth]}
     elif auth_type == "bearer" and bearer_token:
         headers["Authorization"] = f"Bearer {bearer_token}"
     elif auth_type == "basic" and username and password:
@@ -88,7 +101,8 @@ def create_http_client(
         base_url=base_url,
         auth=auth,
         headers=headers,
-        timeout=30.0
+        timeout=30.0,
+        event_hooks=event_hooks or {}
     )
 
 
@@ -104,18 +118,38 @@ def create_tools_only_route_maps() -> List[RouteMap]:
 
 
 def validate_auth_params(auth_type: str, **auth_kwargs) -> None:
-    """Validate authentication parameters."""
+    """Validate authentication parameters and related options."""
     auth_requirements = {
         'api_key': ['api_key'],
         'bearer': ['bearer_token'],
         'basic': ['username', 'password']
     }
-    
+
+    # Required values per auth type
     if auth_type in auth_requirements:
-        missing = [param for param in auth_requirements[auth_type] 
-                  if not auth_kwargs.get(param)]
+        missing = [param for param in auth_requirements[auth_type]
+                   if not auth_kwargs.get(param)]
         if missing:
             click.echo(f"❌ Error: {', '.join(missing)} required for {auth_type} authentication", err=True)
+            sys.exit(1)
+
+    # Extended validation for api_key location/param behavior
+    api_key_location = auth_kwargs.get('api_key_location', 'header')
+    api_key_param_name = auth_kwargs.get('api_key_param_name', 'key')
+
+    if auth_type != 'api_key':
+        # If not using api_key auth, only allow default header location (ignore defaults silently)
+        if api_key_location != 'header':
+            click.echo("❌ --api-key-location is only valid when --auth-type api_key", err=True)
+            sys.exit(1)
+        # api_key_param_name is only meaningful when query mode is active; ignore otherwise
+    else:
+        # auth_type == 'api_key'
+        if api_key_location not in ('header', 'query'):
+            click.echo("❌ --api-key-location must be either 'header' or 'query'", err=True)
+            sys.exit(1)
+        if api_key_location == 'query' and not api_key_param_name:
+            click.echo("❌ --api-key-param-name must be provided when --api-key-location query is used", err=True)
             sys.exit(1)
 
 
@@ -168,9 +202,10 @@ def create_mcp_server(
 @click.option('--debug', is_flag=True, help='Enable debug logging')
 # Transport option
 @click.option('-t', '--server-type',
-              type=click.Choice(['sse', 'http']),
-              default='sse',
-              help='Transport type for FastMCP server (default: sse)')
+              type=click.Choice(['sse', 'http', 'stdio']),
+              envvar='SERVER_TYPE',
+              default='stdio',
+              help='Transport type for FastMCP server (default: stdio)')
 # Authentication options
 @click.option('--auth-type', 
               type=click.Choice(['none', 'api_key', 'bearer', 'basic']), 
@@ -182,6 +217,15 @@ def create_mcp_server(
 @click.option('--api-key-header', 
               default='X-API-Key', 
               help='Header name for API key')
+@click.option('--api-key-location',
+              type=click.Choice(['header', 'query']),
+              default='header',
+              envvar='API_KEY_LOCATION',
+              help='Where to send API key when --auth-type api_key is used (default: header)')
+@click.option('--api-key-param-name',
+              default='key',
+              envvar='API_KEY_PARAM_NAME',
+              help='Query parameter name when using --api-key-location query (default: key)')
 @click.option('--bearer-token', 
               envvar='BEARER_TOKEN', 
               help='Bearer token (or set BEARER_TOKEN env var)')
@@ -216,6 +260,8 @@ def cli(
     auth_type: str,
     api_key: Optional[str],
     api_key_header: str,
+    api_key_location: str,
+    api_key_param_name: str,
     bearer_token: Optional[str],
     username: Optional[str],
     password: Optional[str],
@@ -242,9 +288,16 @@ def cli(
         logging.getLogger('fastmcp').setLevel(logging.DEBUG)
         logging.getLogger('uvicorn').setLevel(logging.DEBUG)
     
-    # Validate authentication parameters
-    validate_auth_params(auth_type, api_key=api_key, bearer_token=bearer_token, 
-                        username=username, password=password)
+    # Validate authentication parameters (including query-param options)
+    validate_auth_params(
+        auth_type,
+        api_key=api_key,
+        bearer_token=bearer_token,
+        username=username,
+        password=password,
+        api_key_location=api_key_location,
+        api_key_param_name=api_key_param_name,
+    )
     
     # Parse custom headers
     custom_headers = parse_custom_headers(header)
@@ -291,25 +344,40 @@ def cli(
             auth_type=auth_type,
             api_key=api_key,
             api_key_header=api_key_header,
+            api_key_location=api_key_location,
+            api_key_param_name=api_key_param_name,
             bearer_token=bearer_token,
             username=username,
             password=password,
             custom_headers=custom_headers
         )
-        
+
+        log_level = "info" if not debug else "debug"
+
         if server_type == 'sse':
             click.echo(f"🌐 Starting SSE MCP server at http://{host}:{port}", err=True)
             click.echo(f"📡 MCP endpoint: http://{host}:{port}/sse", err=True)
-        else:
+            mcp.run(
+                transport='sse',
+                host=host,
+                port=port,
+                log_level=log_level
+            )
+        elif server_type == 'http':
             click.echo(f"🌐 Starting HTTP MCP server at http://{host}:{port}", err=True)
             click.echo(f"📡 MCP endpoint: http://{host}:{port}", err=True)
-        
-        mcp.run(
-            transport=server_type,
-            host=host,
-            port=port,
-            log_level="info" if not debug else "debug"
-        )
+            mcp.run(
+                transport='http',
+                host=host,
+                port=port,
+                log_level=log_level
+            )
+        elif server_type == 'stdio':
+            click.echo("🔌 Starting STDIO MCP server (stdin/stdout)", err=True)
+            # Reserve stdout for protocol; logs already go to stderr via logging/click
+            mcp.run(
+                transport='stdio'
+            )
         
     except KeyboardInterrupt:
         click.echo("\n👋 Server stopped by user", err=True)

@@ -1,10 +1,11 @@
 # OpenAPI MCP Server
 
-A CLI tool that creates **SSE or HTTP MCP servers** from OpenAPI specifications with full Cursor compatibility.
+A CLI tool that creates **STDIO (default), SSE, or HTTP MCP servers** from OpenAPI specifications with full Cursor compatibility.
 
 ## Features
 
-- 🌐 **Remote MCP Server** - HTTP-based with Server-Sent Events (SSE) or plain HTTP (not stdio)
+- 🔌 **STDIO MCP Server (default)** - speak MCP over stdin/stdout for local/managed execution
+- 🌐 **Remote MCP Server** - HTTP-based with Server-Sent Events (SSE) or plain HTTP
 - 🔧 **All endpoints become Tools** (not Resources) for maximum Cursor compatibility
 - 📡 **Support for URLs and local files** as OpenAPI spec sources
 - 🔐 **Multiple authentication methods** (API Key, Bearer Token, Basic Auth)
@@ -14,7 +15,10 @@ A CLI tool that creates **SSE or HTTP MCP servers** from OpenAPI specifications 
 
 ## Architecture
 
-Unlike stdio-based MCP servers, this creates an **HTTP server** that serves MCP over **Server-Sent Events (SSE)** or **plain HTTP**. This makes it perfect for remote MCP clients and web-based integrations.
+This tool supports two modes of operation:
+
+- **STDIO (default)**: speaks MCP JSON-RPC over stdin/stdout. Ideal for local tools and when spawning the server directly from an MCP client (e.g., via Docker with `-i`).
+- **Remote HTTP**: serves MCP over **Server-Sent Events (SSE)** or **plain HTTP**. Ideal for remote/networked MCP clients and web integrations.
 
 ## Quick Start
 
@@ -24,8 +28,12 @@ Unlike stdio-based MCP servers, this creates an **HTTP server** that serves MCP 
 # Build the image
 docker build -t openapi-mcp-server .
 
-# Run SSE server (default)
-docker run -p 8000:8000 openapi-mcp-server https://api.example.com/openapi.json
+# Run STDIO server (default)
+# Note: use -i (no -t). stdout carries protocol; logs go to stderr.
+docker run --rm -i --init openapi-mcp-server https://api.example.com/openapi.json
+
+# Run SSE server
+docker run -p 8000:8000 openapi-mcp-server https://api.example.com/openapi.json --server-type sse
 
 # Run with authentication
 docker run -p 8000:8000 -e API_KEY=your_key openapi-mcp-server \
@@ -47,9 +55,9 @@ docker run -p 9000:9000 openapi-mcp-server \
 pip install -r requirements.txt
 pip install -e .
 
-# Run SSE server (default)
+# Run STDIO server (default)
 openapi-mcp-server https://api.example.com/openapi.json
-openapi-mcp-server ./openapi.yaml --auth-type api_key --api-key YOUR_KEY --port 8080
+openapi-mcp-server ./openapi.yaml --auth-type api_key --api-key YOUR_KEY
 
 # Run HTTP server
 openapi-mcp-server https://api.example.com/openapi.json --server-type http
@@ -60,13 +68,15 @@ openapi-mcp-server https://api.example.com/openapi.json --server-type http
 ### From URL
 ```bash
 openapi-mcp-server https://api.example.com/openapi.json
-# Server runs at http://localhost:8000/sse
+# Default: STDIO mode over stdin/stdout
+# For SSE instead: add `--server-type sse` and map a port
 ```
 
 ### From Local File  
 ```bash
 openapi-mcp-server ./openapi.yaml --auth-type api_key --api-key YOUR_KEY --port 8080
-# Server runs at http://localhost:8080/sse
+# Default: STDIO mode
+# For SSE: `--server-type sse` and check http://localhost:8080/sse
 
 ### HTTP Transport
 ```bash
@@ -94,12 +104,29 @@ openapi-mcp-server openapi.json --methods GET,POST --include-paths "/api/.*"
 openapi-mcp-server openapi.json --exclude-paths "/admin/.*" --exclude-tags "admin"
 ```
 
+### API key in query string (e.g., Shodan expects ?key=...)
+```bash
+# CLI example
+openapi-mcp-server https://developer.shodan.io/api/openapi.json \
+  --auth-type api_key \
+  --api-key "$SHODAN_KEY" \
+  --api-key-location query \
+  --api-key-param-name key
+```
+
 ### With Environment Variables
 ```bash
 export API_KEY=your_api_key
 export BEARER_TOKEN=your_bearer_token
+export SERVER_TYPE=stdio   # or sse|http
 
+# Header-based API key auth (default)
 openapi-mcp-server openapi.json --auth-type api_key --host 0.0.0.0 --port 8000
+
+# Query-parameter API key auth (e.g., Shodan expects ?key=...)
+export API_KEY_LOCATION=query
+export API_KEY_PARAM_NAME=key
+openapi-mcp-server openapi.json --auth-type api_key
 ```
 
 ## Configuration for Cursor
@@ -116,12 +143,36 @@ Add to your Cursor MCP configuration for **SSE remote connection**:
 }
 ```
 
+### Cursor Configuration (STDIO via Docker)
+
+You can also spawn the server via Docker using STDIO (recommended for local use):
+
+```json
+{
+  "mcpServers": {
+    "my-api-stdio": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i", "--init",
+        "openapi-mcp-server",
+        "https://api.example.com/openapi.json",
+        "--server-type", "stdio"
+      ]
+    }
+  }
+}
+```
+Notes:
+- Do NOT pass Docker `-t` (TTY) in STDIO mode; it can corrupt framing.
+- Use `-i` to keep stdin open.
+
 ## Server Endpoints
 
 When the server is running, it exposes:
 
 - **`/sse`** - Main MCP Server-Sent Events endpoint (SSE mode)
 - **`/`** - Base HTTP endpoint (HTTP mode)
+  (No HTTP endpoint in STDIO mode; protocol flows over stdin/stdout.)
 
 ## Docker Commands
 
@@ -133,20 +184,21 @@ docker build -t openapi-mcp-server .
 ### Run Examples
 ```bash
 # Basic usage
-docker run -p 8000:8000 openapi-mcp-server https://api.example.com/openapi.json
+docker run -p 8000:8000 openapi-mcp-server https://api.example.com/openapi.json --server-type sse
 
 # With environment file
-docker run -p 8000:8000 --env-file .env openapi-mcp-server https://api.example.com/openapi.json
+docker run -p 8000:8000 --env-file .env openapi-mcp-server https://api.example.com/openapi.json --server-type sse
 
 # With local spec file
-docker run -p 8000:8000 -v $(pwd)/specs:/app/specs openapi-mcp-server /app/specs/api.json
+docker run -p 8000:8000 -v $(pwd)/specs:/app/specs openapi-mcp-server /app/specs/api.json --server-type sse
 
 # With custom headers
 docker run -p 8000:8000 openapi-mcp-server https://api.example.com/openapi.json \
+  --server-type sse \
   --header "X-Custom-Header: value" --header "User-Agent: MyApp/1.0"
 
 # Background mode
-docker run -d -p 8000:8000 --name my-mcp-server openapi-mcp-server https://api.example.com/openapi.json
+docker run -d -p 8000:8000 --name my-mcp-server openapi-mcp-server https://api.example.com/openapi.json --server-type sse
 
 # Check server status
 curl http://localhost:8000/health
@@ -164,7 +216,7 @@ Options:
   --port INTEGER             Port to bind (default: 8000)
   --base-url TEXT            Override base URL for API requests
   --debug                    Enable debug logging
-  --server-type [sse|http]   Transport type for FastMCP server (default: sse)
+  --server-type [sse|http|stdio]   Transport type for FastMCP server (default: stdio)
   --auth-type [none|api_key|bearer|basic]  Authentication type
   --api-key TEXT             API key (or set API_KEY env var)
   --api-key-header TEXT      Header name for API key (default: X-API-Key)

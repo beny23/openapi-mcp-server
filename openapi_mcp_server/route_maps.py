@@ -60,6 +60,17 @@ def create_route_maps_from_filters(
             
         route_maps.append(RouteMap(**kwargs))
     
+    # Create exclusion route maps for unwanted HTTP methods
+    if method_list:
+        all_methods = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+        excluded_methods = all_methods - set(method_list)
+        for method in excluded_methods:
+            route_maps.append(RouteMap(
+                methods=[method],
+                pattern=r".*",
+                mcp_type=MCPType.EXCLUDE
+            ))
+    
     # Create exclude route maps
     for pattern in exclude_path_list or []:
         route_maps.append(RouteMap(
